@@ -27,6 +27,7 @@ TARGET_ALT = 5  # Target altitude in meters
 def free_acm_usb_ports() -> None:
     """Free busy /dev/ttyACM* and /dev/ttyUSB* ports by killing their processes."""
     print("\n🧹 Checking for busy /dev/ttyACM* and /dev/ttyUSB* ports...")
+
     try:
         for pattern in ["/dev/ttyACM*", "/dev/ttyUSB*"]:
             result = subprocess.run(
