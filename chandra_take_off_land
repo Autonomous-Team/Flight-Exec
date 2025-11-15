@@ -1,0 +1,133 @@
+from dronekit import connect, VehicleMode
+import time
+
+# ==============================
+# 1. CONNECT TO VEHICLE (USB)
+# ==============================
+# On Jetson, Pixhawk usually appears as /dev/ttyACM0 or /dev/ttyACM1.
+# Check with:  ls /dev/ttyACM*
+#
+# If needed, change '/dev/ttyACM0' below.
+print("Connecting to vehicle on USB...")
+vehicle = connect('/dev/ttyACM0', baud=115200, wait_ready=True)
+print("Connected.")
+print("  Mode:", vehicle.mode.name)
+print("  System status:", vehicle.system_status.state)
+
+
+# ==============================
+# 2. SMALL HELPER
+# ==============================
+def wait_until(label, condition_fn, timeout_s=60, interval_s=1.0):
+    """
+    Wait for condition_fn() to become True within timeout_s seconds.
+    Returns True if OK, False on timeout.
+    """
+    print(f"[CHECK] {label}")
+    start = time.time()
+    while not condition_fn():
+        if time.time() - start > timeout_s:
+            print(f"  -> TIMEOUT: {label}")
+            return False
+        print("   waiting...")
+        time.sleep(interval_s)
+    print(f"  -> OK: {label}")
+    return True
+
+
+# ==============================
+# 3. PREFLIGHT + TAKEOFF
+# ==============================
+def arm_and_takeoff(target_alt_m=5.0):
+    """
+    Runs basic preflight checks, arms, and takes off to target_alt_m (meters).
+    """
+
+    print("\n=========== PREFLIGHT ===========")
+
+    # 1) Vehicle should be armable (sensors, EKF, etc.)
+    if not wait_until("Vehicle is armable", lambda: vehicle.is_armable, timeout_s=90):
+        print("FAIL: vehicle.is_armable stayed False. Check Mission Planner messages (pre-arm errors).")
+        return False
+
+    # 2) GPS fix + sats (for outdoor GPS flight)
+    def gps_good():
+        try:
+            return vehicle.gps_0.fix_type >= 3 and \
+                   (vehicle.gps_0.satellites_visible or 0) >= 6
+        except:
+            return False
+
+    if not wait_until("GPS fix >= 3 and sats >= 6", gps_good, timeout_s=120):
+        print("FAIL: GPS not good enough. fix_type:", vehicle.gps_0.fix_type,
+              "sats:", vehicle.gps_0.satellites_visible)
+        return False
+
+    print("  GPS fix_type:", vehicle.gps_0.fix_type,
+          "sats:", vehicle.gps_0.satellites_visible)
+
+    # 3) System state sanity
+    print("  System status:", vehicle.system_status.state)
+
+    print("=========== PREFLIGHT OK ===========\n")
+
+    # ---------------- MODE + ARM ----------------
+    print("Setting mode GUIDED...")
+    vehicle.mode = VehicleMode("GUIDED")
+    if not wait_until("Mode GUIDED", lambda: vehicle.mode.name == "GUIDED", timeout_s=10):
+        print("FAIL: Could not enter GUIDED. Aborting.")
+        return False
+
+    print("Arming motors...")
+    vehicle.armed = True
+    if not wait_until("Vehicle ARMED", lambda: vehicle.armed, timeout_s=15):
+        print("FAIL: Vehicle did not arm. Check safety switch / pre-arm checks.")
+        return False
+
+    print(f"Taking off to {target_alt_m} m...")
+    vehicle.simple_takeoff(target_alt_m)
+
+    # Wait until altitude reaches ~95% target
+    while True:
+        alt = vehicle.location.global_relative_frame.alt
+        print(" Altitude:", alt, "m")
+        if alt >= target_alt_m * 0.95:
+            print("Reached target altitude.")
+            break
+        time.sleep(1)
+
+    return True
+
+
+# ==============================
+# 4. MAIN: 5 m TAKEOFF & LAND
+# ==============================
+try:
+    success = arm_and_takeoff(5.0)
+
+    if not success:
+        print("Preflight / takeoff failed. Not proceeding to hover/land.")
+    else:
+        print("Hovering at ~5 m for 10 seconds...")
+        time.sleep(10)
+
+        print("Switching to LAND mode...")
+        vehicle.mode = VehicleMode("LAND")
+        wait_until("Mode LAND", lambda: vehicle.mode.name == "LAND", timeout_s=10)
+
+        while True:
+            alt = vehicle.location.global_relative_frame.alt
+            print(" Landing… Altitude:", alt, "m")
+            if alt <= 0.2:
+                print("Landed (altitude close to 0).")
+                break
+            time.sleep(1)
+
+        print("Disarming motors…")
+        vehicle.armed = False
+        wait_until("Vehicle DISARMED", lambda: not vehicle.armed, timeout_s=10)
+
+finally:
+    print("Closing vehicle connection.")
+    vehicle.close()
+    print("Done.")
