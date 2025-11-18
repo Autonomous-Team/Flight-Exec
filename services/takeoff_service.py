@@ -1,123 +1,213 @@
 #!/usr/bin/env python3
-"""High-level takeoff and landing operations."""
+"""High-level takeoff and landing operations with home position tracking."""
 
 from __future__ import annotations
 
 import collections
-import logging
-import time
-from typing import Protocol
 
-from dronekit import Vehicle, VehicleMode
-
-from utils.detect_controller import connect_to_first_available, list_candidate_ports
-from utils.free_ports import free_acm_usb_ports
-
+# Fix dronekit compatibility for Python 3.10+
 if not hasattr(collections, "MutableMapping"):
     import collections.abc
-
     collections.MutableMapping = collections.abc.MutableMapping
 
+import logging
+import time
 
-class SupportsVehicle(Protocol):
-    """Minimal protocol to avoid tightly coupling to dronekit.Vehicle in tests."""
+from dronekit import LocationGlobalRelative, Vehicle, VehicleMode
 
-    is_armable: bool
-    mode: VehicleMode
-    armed: bool
-
-    def simple_takeoff(self, target_altitude: float) -> None: ...
-
-    class location:  # type: ignore
-        class global_relative_frame:  # type: ignore
-            alt: float
+from utils.detect_controller import connect_to_first_available, list_candidate_ports
+from utils.emergency_land import emergency_slow_land
+from utils.free_ports import free_acm_usb_ports
+from utils.logger import setup_logger
+from utils.mavlink_logger import create_mavlink_logger
+from utils.safe_disconnect import safe_disconnect
 
 
-def arm_and_takeoff(vehicle: Vehicle, target_altitude: float) -> None:
-    """Arm the vehicle and ascend to the requested altitude."""
-    print("\n[STEP 1] Checking pre-arm conditions...")
-    for _ in range(15):  # Wait up to 15 seconds for armable state
-        if vehicle.is_armable:
-            break
-        print("  Waiting for vehicle to initialise (EKF/GPS)...")
+def arm_and_takeoff(
+    vehicle: Vehicle,
+    target_altitude: float,
+    logger: logging.Logger | None = None,
+) -> tuple[float, float, float]:
+    """Arm the vehicle, save home position, and ascend to target altitude.
+    
+    Args:
+        vehicle: Connected dronekit vehicle instance
+        target_altitude: Target altitude in meters
+        logger: Optional logger instance
+        
+    Returns:
+        Tuple of (home_lat, home_lon, home_alt) saved before takeoff
+    """
+    if logger is None:
+        logger = logging.getLogger("drone_logger")
+    
+    logger.info("Checking pre-arm conditions...")
+    while not vehicle.is_armable:
+        logger.info("Waiting for vehicle to initialise (EKF/GPS)...")
         time.sleep(1)
 
-    print("[STEP 2] Switching to GUIDED mode...")
+    # Save home position BEFORE takeoff
+    loc = vehicle.location.global_relative_frame
+    home_lat = loc.lat
+    home_lon = loc.lon
+    home_alt = loc.alt
+    logger.info(f"Saved HOME: lat={home_lat}, lon={home_lon}, alt={home_alt}")
+
     vehicle.mode = VehicleMode("GUIDED")
-    for _ in range(5):
-        if vehicle.mode.name == "GUIDED":
-            break
-        print("  Waiting for GUIDED mode...")
+    while vehicle.mode.name != "GUIDED":
+        logger.info("Waiting for GUIDED...")
         time.sleep(1)
 
-    print("[STEP 3] Arming motors...")
+    logger.info("Arming motors...")
     vehicle.armed = True
-    for _ in range(5):
-        if vehicle.armed:
-            break
-        print("  Waiting for arming...")
+    while not vehicle.armed:
+        logger.info("Waiting for motors to arm...")
         time.sleep(1)
-    print("✅ Vehicle armed")
 
-    print(f"[STEP 4] Taking off to {target_altitude} meters...")
+    logger.info(f"Taking off to {target_altitude} meters...")
     vehicle.simple_takeoff(target_altitude)
+
     while True:
         alt = vehicle.location.global_relative_frame.alt
-        print(f"  → Altitude: {alt:.2f} m")
+        logger.debug(f"Altitude: {alt:.2f}m")
         if alt >= target_altitude * 0.95:
-            print("✅ Target altitude reached")
             break
         time.sleep(1)
 
+    logger.info("Reached target altitude.")
+    return home_lat, home_lon, home_alt
 
-def land_and_disarm(vehicle: Vehicle) -> None:
-    """Initiate landing and wait for disarm."""
-    print("\n[STEP 5] Landing initiated...")
+
+def hold_position(
+    vehicle: Vehicle,
+    hold_time: float,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Hold position using LOITER mode for stable hover.
+    
+    Args:
+        vehicle: Connected dronekit vehicle instance
+        hold_time: Duration to hold position in seconds
+        logger: Optional logger instance
+    """
+    if logger is None:
+        logger = logging.getLogger("drone_logger")
+    
+    logger.info("Switching to LOITER for stable hover...")
+    vehicle.mode = VehicleMode("LOITER")
+
+    while vehicle.mode.name != "LOITER":
+        logger.info("Waiting for LOITER...")
+        time.sleep(1)
+
+    logger.info(f"Holding position for {hold_time} seconds...")
+    for _ in range(int(hold_time)):
+        loc = vehicle.location.global_relative_frame
+        logger.debug(f"HOLD → lat={loc.lat}, lon={loc.lon}, alt={loc.alt:.2f}m")
+        time.sleep(1)
+
+    logger.info("Hold complete. Switching back to GUIDED...")
+    vehicle.mode = VehicleMode("GUIDED")
+    while vehicle.mode.name != "GUIDED":
+        logger.info("Waiting for GUIDED...")
+        time.sleep(1)
+
+
+def land_at_home(
+    vehicle: Vehicle,
+    home_lat: float,
+    home_lon: float,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Return to home position and land safely.
+    
+    Args:
+        vehicle: Connected dronekit vehicle instance
+        home_lat: Home latitude
+        home_lon: Home longitude
+        logger: Optional logger instance
+    """
+    if logger is None:
+        logger = logging.getLogger("drone_logger")
+    
+    logger.info("Returning to home before landing...")
+
+    home_point = LocationGlobalRelative(home_lat, home_lon, 2)
+    vehicle.simple_goto(home_point)
+
+    for _ in range(6):
+        loc = vehicle.location.global_relative_frame
+        logger.debug(f"Returning home → lat={loc.lat}, lon={loc.lon}, alt={loc.alt:.2f}m")
+        time.sleep(1)
+
+    logger.info("Initiating LAND mode...")
     vehicle.mode = VehicleMode("LAND")
 
-    while True:
+    while vehicle.armed:
         alt = vehicle.location.global_relative_frame.alt
-        print(f"  → Altitude: {alt:.2f} m")
-        if alt <= 0.2:
-            print("✅ Landed successfully")
-            break
+        logger.debug(f"Landing... Alt={alt:.2f}m")
         time.sleep(1)
 
-    print("[STEP 6] Waiting for auto-disarm...")
-    for _ in range(10):
-        if not vehicle.armed:
-            break
-        print("  Waiting for disarm...")
-        time.sleep(1)
-    print("✅ Vehicle disarmed")
+    logger.info("Landed and disarmed.")
 
 
-def execute_takeoff_land(target_altitude: float = 5.0, hover_seconds: float = 10.0) -> None:
-    """Connect, take off, hover, and land."""
+def execute_takeoff_land(
+    target_altitude: float = 5.0,
+    hold_seconds: float = 10.0,
+) -> None:
+    """Execute complete takeoff, hold, and landing sequence.
+    
+    Args:
+        target_altitude: Target altitude in meters (default: 5.0)
+        hold_seconds: Duration to hold position in seconds (default: 10.0)
+    """
+    # Setup logger
+    logger = setup_logger()
+    
+    # Silence verbose dronekit logs
     logging.getLogger("dronekit").setLevel(logging.CRITICAL)
+    
     vehicle: Vehicle | None = None
+    
     try:
+        # Free busy ports
         candidate_ports = list_candidate_ports()
         free_acm_usb_ports(candidate_ports)
+        
+        # Connect to flight controller
         vehicle, port, baud = connect_to_first_available(candidate_ports)
-        print(f"📡 Connected on {port} @ {baud}")
-
-        arm_and_takeoff(vehicle, target_altitude)
-        if hover_seconds > 0:
-            print(f"\n[HOVER] Holding position for {hover_seconds:.0f} seconds...")
-            time.sleep(hover_seconds)
-        land_and_disarm(vehicle)
-    finally:
-        if vehicle is not None:
-            vehicle.close()
-        print("\n🔚 Done — disconnected from flight controller.")
+        logger.info(f"Connected to FC on {port}@{baud}")
+        
+        # Enable MAVLink message logging
+        mavlink_logger = create_mavlink_logger(logger)
+        vehicle.add_message_listener('*', mavlink_logger)
+        logger.info("Full MAVLink logging enabled.")
+        
+        # Takeoff and save home position
+        home_lat, home_lon, home_alt = arm_and_takeoff(vehicle, target_altitude, logger)
+        
+        # Hold using LOITER
+        hold_position(vehicle, hold_seconds, logger)
+        
+        # Return home and land safely
+        land_at_home(vehicle, home_lat, home_lon, logger)
+        
+    except Exception as e:
+        logger.exception(f"ERROR: {e}")
+        if vehicle:
+            emergency_slow_land(vehicle, logger)
+    
+    # Disconnect only if safe conditions are met
+    if vehicle:
+        safe_disconnect(vehicle, logger)
+    else:
+        logger.info("PROGRAM COMPLETE — No vehicle connection.")
 
 
 def main() -> None:
-    """CLI entry point for the takeoff/land routine."""
+    """CLI entry point for takeoff/land routine."""
     execute_takeoff_land()
 
 
 if __name__ == "__main__":
     main()
-

@@ -1,239 +1,304 @@
 #!/usr/bin/env python3
-"""Mission helpers for waypoint navigation flows."""
+"""Mission service for point-to-point navigation with LOITER hold and return-to-home."""
 
 from __future__ import annotations
 
-import argparse
 import collections
+
+# Fix dronekit compatibility for Python 3.10+
+if not hasattr(collections, "MutableMapping"):
+    import collections.abc
+    collections.MutableMapping = collections.abc.MutableMapping
+
 import logging
 import math
 import time
 
 from dronekit import LocationGlobalRelative, Vehicle, VehicleMode
 
+from services.takeoff_service import arm_and_takeoff
 from utils.detect_controller import connect_to_first_available, list_candidate_ports
+from utils.emergency_land import emergency_slow_land
 from utils.free_ports import free_acm_usb_ports
+from utils.logger import setup_logger
+from utils.mavlink_logger import create_mavlink_logger
+from utils.safe_disconnect import safe_disconnect
 
-if not hasattr(collections, "MutableMapping"):
-    import collections.abc
-
-    collections.MutableMapping = collections.abc.MutableMapping
-
-
-def select_active_gps(vehicle: Vehicle, wait_seconds: int = 10) -> int:
-    """Return the index of the GPS source with a valid fix.
-
-    Args:
-        vehicle: Connected dronekit vehicle instance.
-        wait_seconds: Maximum time to wait for a GPS fix if none is available.
-
-    Raises:
-        RuntimeError: If no GPS fix is detected within the wait period.
-    """
-    print("\n[CHECK] Scanning GPS sources...")
-    gps_sources = []
-    for idx in range(2):
-        gps_attr = getattr(vehicle, f"gps_{idx}", None)
-        if gps_attr:
-            gps_sources.append((idx, gps_attr.fix_type, gps_attr.satellites_visible))
-            print(
-                f"  → GPS{idx + 1}: fix_type={gps_attr.fix_type}, "
-                f"satellites={gps_attr.satellites_visible}"
-            )
-
-    gps_sources = [entry for entry in gps_sources if entry[1] >= 3]
-    if gps_sources:
-        best_idx, fix_type, satellites = max(gps_sources, key=lambda item: item[2])
-        print(f"✅ Selected GPS{best_idx + 1} (fix_type={fix_type}, satellites={satellites})")
-        return best_idx
-
-    print(f"❌ No GPS fix yet. Waiting for up to {wait_seconds} seconds for lock...")
-    for _ in range(wait_seconds):
-        for idx in range(2):
-            gps_attr = getattr(vehicle, f"gps_{idx}", None)
-            if gps_attr and gps_attr.fix_type >= 3:
-                print(
-                    f"✅ Using GPS{idx + 1} "
-                    f"(fix_type={gps_attr.fix_type}, satellites={gps_attr.satellites_visible})"
-                )
-                return idx
-        time.sleep(1)
-
-    raise RuntimeError(f"❌ No GPS fix within {wait_seconds} seconds.")
+# -----------------------------------------------------------
+# NAVIGATION UTILITIES
+# -----------------------------------------------------------
+EARTH_RADIUS = 6378137.0
 
 
-def gradual_arm_and_takeoff(vehicle: Vehicle, target_altitude: float) -> None:
-    """Arm the vehicle and take off gradually to the desired altitude."""
-    print("\n[STEP 1] Checking pre-arm conditions...")
-    while not vehicle.is_armable:
-        print("  waiting for vehicle to initialize...")
-        time.sleep(1)
-
-    print("[STEP 2] Switching to GUIDED mode...")
-    vehicle.mode = VehicleMode("GUIDED")
-    while vehicle.mode.name != "GUIDED":
-        print("  waiting for mode change...")
-        time.sleep(1)
-
-    print("[STEP 3] Arming motors...")
-    vehicle.armed = True
-    while not vehicle.armed:
-        print("  waiting for arming...")
-        time.sleep(1)
-    print("✅ Vehicle armed")
-
-    print(f"[STEP 4] Taking off to {target_altitude} meters at 0.1 m/s...")
-    current_alt = vehicle.location.global_relative_frame.alt
-    while current_alt < target_altitude:
-        current_alt += 0.1
-        vehicle.simple_takeoff(current_alt)
-        print(f"  → Altitude: {current_alt:.2f} m")
-        time.sleep(1)
-        if current_alt >= target_altitude:
-            break
-    print("✅ Target altitude reached")
-
-
-def goto_point(
-    vehicle: Vehicle,
+def get_location_offset_meters(
+    origin: LocationGlobalRelative,
     d_north: float,
     d_east: float,
-    target_altitude: float,
-    groundspeed: float = 0.1,
+) -> LocationGlobalRelative:
+    """Convert meter offsets to LocationGlobalRelative.
+    
+    Uses spherical approximation (accurate for small distances).
+    
+    Args:
+        origin: Starting location
+        d_north: Meters to move north (positive) or south (negative)
+        d_east: Meters to move east (positive) or west (negative)
+        
+    Returns:
+        New LocationGlobalRelative with offset coordinates
+    """
+    lat_rad = math.radians(origin.lat)
+    d_lat = d_north / EARTH_RADIUS
+    d_lon = d_east / (EARTH_RADIUS * math.cos(lat_rad))
+    new_lat = origin.lat + math.degrees(d_lat)
+    new_lon = origin.lon + math.degrees(d_lon)
+    return LocationGlobalRelative(new_lat, new_lon, origin.alt)
+
+
+def haversine_distance_m(
+    location_a: LocationGlobalRelative,
+    location_b: LocationGlobalRelative,
+) -> float:
+    """Calculate Haversine distance between two locations in meters.
+    
+    Args:
+        location_a: First location
+        location_b: Second location
+        
+    Returns:
+        Distance in meters
+    """
+    lat1 = math.radians(location_a.lat)
+    lon1 = math.radians(location_a.lon)
+    lat2 = math.radians(location_b.lat)
+    lon2 = math.radians(location_b.lon)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    sa = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(sa), math.sqrt(max(0.0, 1 - sa)))
+    return EARTH_RADIUS * c
+
+
+# -----------------------------------------------------------
+# MISSION FUNCTIONS
+# -----------------------------------------------------------
+def goto_point(
+    vehicle: Vehicle,
+    target_location: LocationGlobalRelative,
+    groundspeed: float = 0.5,
+    tolerance_m: float = 0.5,
+    logger: logging.Logger | None = None,
 ) -> None:
-    """Fly to a point offset from the current position."""
-    print(
-        f"\n[STEP 5] Going to target point ({d_north} m North, {d_east} m East) "
-        f"at {target_altitude} m altitude ({groundspeed} m/s)..."
+    """Navigate to a target location using GUIDED mode.
+    
+    Args:
+        vehicle: Connected dronekit vehicle instance
+        target_location: Target location to navigate to
+        groundspeed: Ground speed in m/s (default: 0.5)
+        tolerance_m: Distance tolerance in meters (default: 0.5)
+        logger: Optional logger instance
+    """
+    if logger is None:
+        logger = logging.getLogger("drone_logger")
+    
+    logger.info(
+        f"Navigating to target: lat={target_location.lat}, "
+        f"lon={target_location.lon}, alt={target_location.alt:.2f}m"
     )
-    current_location = vehicle.location.global_relative_frame
-    target_location = _location_offset_meters(current_location, d_north, d_east)
-    target_location.alt = target_altitude
-    vehicle.simple_goto(target_location, groundspeed=groundspeed)
+    try:
+        vehicle.simple_goto(target_location, groundspeed=groundspeed)
+    except Exception as e:
+        logger.warning(f"simple_goto raised: {e}")
 
     while True:
-        distance = _distance_metres(vehicle.location.global_relative_frame, target_location)
-        current_alt = vehicle.location.global_relative_frame.alt
-        print(f"  → Distance: {distance:.2f} m | Altitude: {current_alt:.2f} m")
-        if distance <= 0.5 and abs(current_alt - target_altitude) <= 0.2:
-            print("✅ Arrived at target point and altitude")
-            break
+        try:
+            current = vehicle.location.global_relative_frame
+            dist = haversine_distance_m(current, target_location)
+            logger.debug(f"Distance to target: {dist:.2f}m")
+            if dist <= tolerance_m:
+                logger.info("Reached target location (within tolerance).")
+                break
+        except Exception as e:
+            logger.warning(f"Error reading location while navigating: {e}")
         time.sleep(1)
 
 
-def gradual_descent_and_land(vehicle: Vehicle) -> None:
-    """Descend at 0.1 m/s until landing and disarm."""
-    print("\n[STEP 6] Initiating descent and landing at 0.1 m/s...")
-    while True:
-        alt = vehicle.location.global_relative_frame.alt
-        if alt <= 0.2:
-            print("✅ Landed successfully")
-            break
-        alt -= 0.1
-        print(f"  → Descending... current altitude: {alt:.2f} m")
+def hold_at_point_using_loiter(
+    vehicle: Vehicle,
+    hold_time: float = 10.0,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Hold position using LOITER mode for stable hover.
+    
+    Args:
+        vehicle: Connected dronekit vehicle instance
+        hold_time: Duration to hold position in seconds (default: 10.0)
+        logger: Optional logger instance
+    """
+    if logger is None:
+        logger = logging.getLogger("drone_logger")
+    
+    logger.info("Switching to LOITER for stable hold...")
+    try:
+        vehicle.mode = VehicleMode("LOITER")
+    except Exception as e:
+        logger.warning(f"Could not set LOITER: {e}")
+
+    start = time.time()
+    while vehicle.mode.name != "LOITER":
+        logger.info("Waiting for LOITER...")
         time.sleep(1)
-    vehicle.mode = VehicleMode("LAND")
-    print("[STEP 7] Disarming motors...")
-    vehicle.armed = False
+        if time.time() - start > 10:
+            logger.warning("LOITER taking a while; continuing to wait.")
+
+    logger.info(f"Holding in LOITER for {hold_time} seconds...")
+    t0 = time.time()
+    while time.time() - t0 < hold_time:
+        try:
+            loc = vehicle.location.global_relative_frame
+            logger.debug(f"LOITER HOLD → lat={loc.lat}, lon={loc.lon}, alt={loc.alt:.2f}m")
+        except Exception as e:
+            logger.warning(f"Error reading location during LOITER: {e}")
+        time.sleep(1)
+
+    logger.info("LOITER hold complete. Switching back to GUIDED.")
+    try:
+        vehicle.mode = VehicleMode("GUIDED")
+    except Exception as e:
+        logger.warning(f"Could not switch back to GUIDED: {e}")
+    
+    # Wait until GUIDED active
+    start = time.time()
+    while vehicle.mode.name != "GUIDED":
+        logger.info("Waiting for GUIDED mode...")
+        time.sleep(1)
+        if time.time() - start > 10:
+            logger.warning("GUIDED switch taking long; continuing to wait.")
+
+
+def return_home_and_land(
+    vehicle: Vehicle,
+    home_location: LocationGlobalRelative,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Return to home position and land safely.
+    
+    Args:
+        vehicle: Connected dronekit vehicle instance
+        home_location: Home location to return to
+        logger: Optional logger instance
+    """
+    if logger is None:
+        logger = logging.getLogger("drone_logger")
+    
+    if home_location is None:
+        logger.error("HOME_LOCATION unknown — cannot return home safely.")
+        return
+
+    logger.info("Returning to HOME in GUIDED mode (approach altitude 2m)...")
+    home_approach = LocationGlobalRelative(home_location.lat, home_location.lon, 2)
+    goto_point(vehicle, home_approach, groundspeed=0.5, tolerance_m=0.7, logger=logger)
+
+    logger.info("Within approach tolerance; commanding LAND mode.")
+    try:
+        vehicle.mode = VehicleMode("LAND")
+    except Exception as e:
+        logger.warning(f"Could not set LAND mode: {e}")
+
+    logger.info("Waiting for disarm (landing complete)...")
+    start = time.time()
     while vehicle.armed:
-        print("  waiting for disarm...")
+        try:
+            alt = vehicle.location.global_relative_frame.alt
+            logger.debug(f"Landing... alt={alt:.2f}m")
+        except Exception:
+            logger.debug("Landing... (no location)")
         time.sleep(1)
-    print("✅ Vehicle disarmed")
+        if time.time() - start > 300:
+            logger.error("Timeout waiting for disarm while landing.")
+            break
+    logger.info("Landed and disarmed (if disarm occurred).")
 
 
 def execute_point_to_point_mission(
-    takeoff_altitude: float,
-    north_offset: float,
-    east_offset: float,
-    target_altitude: float,
-    *,
-    hover_delay: float = 3.0,
-    gps_wait_seconds: int = 10,
+    target_altitude: float = 3.0,
+    move_north: float = 5.0,
+    move_east: float = 0.0,
+    hold_time: float = 10.0,
 ) -> None:
-    """Run a complete point-to-point mission from takeoff to landing."""
+    """Execute complete point-to-point mission: takeoff, move to B, hold, return home.
+    
+    Args:
+        target_altitude: Takeoff altitude in meters (default: 3.0)
+        move_north: Meters to move north from home (default: 5.0)
+        move_east: Meters to move east from home (default: 0.0)
+        hold_time: Duration to hold at point B in seconds (default: 10.0)
+    """
+    # Setup logger
+    logger = setup_logger()
+    
+    # Silence verbose dronekit logs
     logging.getLogger("dronekit").setLevel(logging.CRITICAL)
+    
     vehicle: Vehicle | None = None
+    home_location: LocationGlobalRelative | None = None
+    
     try:
+        # Free busy ports
         candidate_ports = list_candidate_ports()
         free_acm_usb_ports(candidate_ports)
+        
+        # Connect to flight controller
         vehicle, port, baud = connect_to_first_available(candidate_ports)
-        print(f"📡 Connected on {port} @ {baud}")
+        logger.info(f"Connected to FC on {port}@{baud}")
+        
+        # Enable MAVLink message logging
+        mavlink_logger = create_mavlink_logger(logger)
+        vehicle.add_message_listener('*', mavlink_logger)
+        logger.info("MAVLink full logging enabled.")
+        
+        # Takeoff and save home position
+        home_lat, home_lon, home_alt = arm_and_takeoff(vehicle, target_altitude, logger)
+        home_location = LocationGlobalRelative(home_lat, home_lon, home_alt)
+        logger.info(
+            f"Saved HOME before takeoff: lat={home_location.lat}, "
+            f"lon={home_location.lon}, alt={home_location.alt:.2f}m"
+        )
+        
+        # Compute point B relative to home
+        point_B = get_location_offset_meters(home_location, move_north, move_east)
+        point_B.alt = target_altitude  # Maintain altitude
+        logger.info(f"Point B calculated: lat={point_B.lat}, lon={point_B.lon}, alt={point_B.alt:.2f}m")
+        
+        # Navigate to point B using GUIDED
+        goto_point(vehicle, point_B, groundspeed=0.5, tolerance_m=0.5, logger=logger)
+        
+        # Hold at B using LOITER
+        hold_at_point_using_loiter(vehicle, hold_time=hold_time, logger=logger)
+        
+        # Return home and land
+        return_home_and_land(vehicle, home_location, logger)
+        
+        logger.info("Mission complete.")
+        
+    except Exception as e:
+        logger.exception(f"ERROR during mission: {e}")
+        if vehicle:
+            emergency_slow_land(vehicle, logger)
+        else:
+            logger.critical("Vehicle object is None — cannot run emergency procedure.")
+    
+    # Disconnect only if safe conditions are met
+    if vehicle:
+        safe_disconnect(vehicle, logger)
+    else:
+        logger.info("Script finished — No vehicle connection.")
 
-        active_gps_index = select_active_gps(vehicle, wait_seconds=gps_wait_seconds)
-        print(f"📍 Active GPS: GPS{active_gps_index + 1}")
 
-        gradual_arm_and_takeoff(vehicle, takeoff_altitude)
-        goto_point(vehicle, north_offset, east_offset, target_altitude)
-        if hover_delay > 0:
-            print(f"\n[HOVER] Holding position for {hover_delay:.0f} seconds...")
-            time.sleep(hover_delay)
-        gradual_descent_and_land(vehicle)
-    finally:
-        if vehicle is not None:
-            vehicle.close()
-        print("\n🔚 Done — disconnected.")
-
-
-def build_cli_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Fly from takeoff to an offset waypoint, then land.",
-    )
-    parser.add_argument("takeoff_altitude", type=float, help="Altitude to reach on takeoff (meters)")
-    parser.add_argument("north_offset", type=float, help="Meters to travel north from the takeoff point")
-    parser.add_argument("east_offset", type=float, help="Meters to travel east from the takeoff point")
-    parser.add_argument("target_altitude", type=float, help="Cruise altitude at the waypoint (meters)")
-    parser.add_argument(
-        "--hover-delay",
-        type=float,
-        default=3.0,
-        help="Seconds to loiter before initiating landing (default: 3)",
-    )
-    parser.add_argument(
-        "--gps-wait",
-        type=int,
-        default=10,
-        help="Seconds to wait for GPS fix if none available (default: 10)",
-    )
-    return parser
-
-
-def main(args: list[str] | None = None) -> None:
-    parser = build_cli_parser()
-    parsed = parser.parse_args(args=args)
-    execute_point_to_point_mission(
-        parsed.takeoff_altitude,
-        parsed.north_offset,
-        parsed.east_offset,
-        parsed.target_altitude,
-        hover_delay=parsed.hover_delay,
-        gps_wait_seconds=parsed.gps_wait,
-    )
+def main() -> None:
+    """CLI entry point for point-to-point mission."""
+    execute_point_to_point_mission()
 
 
 if __name__ == "__main__":
     main()
-
-def _location_offset_meters(
-    original_location: LocationGlobalRelative,
-    d_north: float,
-    d_east: float,
-) -> LocationGlobalRelative:
-    """Return a new location offset by metres north/east."""
-    earth_radius = 6_378_137.0
-    new_lat = original_location.lat + (d_north / earth_radius) * (180 / math.pi)
-    new_lon = original_location.lon + (
-        d_east / (earth_radius * math.cos(math.pi * original_location.lat / 180))
-    ) * (180 / math.pi)
-    return LocationGlobalRelative(new_lat, new_lon, original_location.alt)
-
-
-def _distance_metres(
-    location_a: LocationGlobalRelative,
-    location_b: LocationGlobalRelative,
-) -> float:
-    """Distance between two coordinates in metres."""
-    d_lat = location_b.lat - location_a.lat
-    d_lon = location_b.lon - location_a.lon
-    return math.sqrt((d_lat * 1.113195e5) ** 2 + (d_lon * 1.113195e5) ** 2)
-
-
