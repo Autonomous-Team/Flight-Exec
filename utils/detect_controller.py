@@ -4,12 +4,11 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 from typing import Iterable, Sequence, Tuple
 
-import serial
-import serial.tools.list_ports
 from dronekit import Vehicle, connect
+
+from utils.port_utils import list_serial_ports, set_port_permissions
 
 # Silence verbose dronekit logs by default; callers can override this logger.
 logging.getLogger("dronekit").setLevel(logging.CRITICAL)
@@ -31,11 +30,7 @@ def list_candidate_ports(
 ) -> Tuple[str, ...]:
     """Return detected flight-controller ports ordered by priority."""
     print("\n🔍 Detecting flight controller...")
-    detected_ports = [
-        port.device
-        for port in serial.tools.list_ports.comports()
-        if "ACM" in port.device or "USB" in port.device
-    ]
+    detected_ports = list_serial_ports()
 
     if not detected_ports:
         raise RuntimeError("❌ No flight controller found on /dev/ttyACM* or /dev/ttyUSB*")
@@ -53,16 +48,7 @@ def connect_to_first_available(
 ) -> Tuple[Vehicle, str, int]:
     """Attempt to connect to the first responsive port in the provided list."""
     for port in ordered_ports:
-        try:
-            subprocess.run(
-                ["sudo", "chmod", "666", port],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            print(f"🔐 Permissions set for {port}")
-        except Exception as exc:  # pragma: no cover - defensive logging
-            print(f"⚠️ Could not set permissions for {port}: {exc}")
+        set_port_permissions(port)
 
         for baud in preferred_bauds:
             try:
