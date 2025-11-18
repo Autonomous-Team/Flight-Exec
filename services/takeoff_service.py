@@ -196,8 +196,10 @@ def execute_takeoff_land(
         logger.exception(f"ERROR: {e}")
         if vehicle:
             emergency_slow_land(vehicle, logger)
+            # Emergency landing already disconnects, so set vehicle to None
+            vehicle = None
     
-    # Disconnect only if safe conditions are met
+    # Disconnect only if safe conditions are met (if not already disconnected by emergency)
     if vehicle:
         safe_disconnect(vehicle, logger)
     else:

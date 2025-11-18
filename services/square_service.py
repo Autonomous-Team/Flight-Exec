@@ -150,7 +150,7 @@ def execute_square_mission(
     logger.info(f"Home (A) saved before takeoff: lat={home_lat}, lon={home_lon}")
     
     # Takeoff
-    arm_and_takeoff(vehicle, altitude)
+    arm_and_takeoff(vehicle, altitude, logger)
     logger.info("Takeoff complete")
     
     # Hold at starting position
@@ -226,8 +226,10 @@ def execute_square_mission_service(
         logger.exception(f"ERROR DURING MISSION: {e}")
         if vehicle:
             emergency_slow_land(vehicle, logger)
+            # Emergency landing already disconnects, so set vehicle to None
+            vehicle = None
     finally:
-        # Disconnect only if safe conditions are met
+        # Disconnect only if safe conditions are met (if not already disconnected by emergency)
         if vehicle:
             safe_disconnect(vehicle, logger)
         else:

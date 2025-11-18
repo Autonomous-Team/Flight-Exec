@@ -35,9 +35,13 @@ def safe_disconnect(
     
     wait_count = 0
     while wait_count < max_wait_time:
-        loc = vehicle.location.global_relative_frame
-        alt = loc.alt
-        armed = vehicle.armed
+        try:
+            loc = vehicle.location.global_relative_frame
+            alt = loc.alt
+            armed = vehicle.armed
+        except Exception as e:
+            logger.warning(f"Error accessing vehicle state: {e}. Vehicle may be disconnected.")
+            return
         
         logger.debug(f"Safety check: alt={alt:.2f}m, armed={armed}")
         
@@ -58,9 +62,17 @@ def safe_disconnect(
             )
         time.sleep(1)
     
-    logger.warning(
-        f"⚠️ Timeout waiting for safe conditions. "
-        f"Current state: alt={vehicle.location.global_relative_frame.alt:.2f}m, "
-        f"armed={vehicle.armed}. Keeping connection open for safety."
-    )
+    try:
+        current_alt = vehicle.location.global_relative_frame.alt
+        current_armed = vehicle.armed
+        logger.warning(
+            f"⚠️ Timeout waiting for safe conditions. "
+            f"Current state: alt={current_alt:.2f}m, "
+            f"armed={current_armed}. Keeping connection open for safety."
+        )
+    except Exception as e:
+        logger.warning(
+            f"⚠️ Timeout waiting for safe conditions. "
+            f"Could not read vehicle state: {e}. Keeping connection open for safety."
+        )
 

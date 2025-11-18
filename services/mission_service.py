@@ -285,10 +285,12 @@ def execute_point_to_point_mission(
         logger.exception(f"ERROR during mission: {e}")
         if vehicle:
             emergency_slow_land(vehicle, logger)
+            # Emergency landing already disconnects, so set vehicle to None
+            vehicle = None
         else:
             logger.critical("Vehicle object is None — cannot run emergency procedure.")
     
-    # Disconnect only if safe conditions are met
+    # Disconnect only if safe conditions are met (if not already disconnected by emergency)
     if vehicle:
         safe_disconnect(vehicle, logger)
     else:
