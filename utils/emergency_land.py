@@ -10,21 +10,44 @@ from dronekit import LocationGlobalRelative, Vehicle, VehicleMode
 
 
 def emergency_slow_land(vehicle: Vehicle, logger: logging.Logger | None = None) -> None:
-    """Perform emergency slow descent and land.
+    """Perform emergency slow descent and land."""
     
-    Args:
-        vehicle: Connected dronekit vehicle instance
-        logger: Logger instance. If None, uses default logger.
-    """
     if logger is None:
         logger = logging.getLogger("drone_logger")
     
     logger.critical("!!! EMERGENCY: Slow descent + land !!!")
 
+    # ---------------------------------------------------------
+    # SAFE GUIDED-MODE CHECK (your requested enhancement)
+    # ---------------------------------------------------------
+    guided_ok = False
     try:
+        logger.info("Requesting GUIDED mode...")
         vehicle.mode = VehicleMode("GUIDED")
-    except Exception:
-        logger.warning("Could not force GUIDED in emergency.")
+        time.sleep(0.5)
+
+        for _ in range(6):  # wait up to 3 seconds
+            if vehicle.mode.name == "GUIDED":
+                guided_ok = True
+                break
+            time.sleep(0.5)
+
+        if not guided_ok:
+            logger.warning("❌ GUIDED mode not accepted by autopilot.")
+        else:
+            logger.info("✅ GUIDED mode accepted.")
+
+    except Exception as e:
+        logger.warning(f"❌ Could not force GUIDED in emergency: {e}")
+        guided_ok = False
+
+    if not guided_ok:
+        logger.critical("⚠️ GUIDED unavailable → Emergency LAND initiated.")
+        vehicle.mode = VehicleMode("LAND")
+        return
+    # ---------------------------------------------------------
+    # END MODIFICATION
+    # ---------------------------------------------------------
 
     DESCENT_RATE = 0.5
     MIN_ALT = 0.5
@@ -52,12 +75,11 @@ def emergency_slow_land(vehicle: Vehicle, logger: logging.Logger | None = None) 
         time.sleep(1)
 
     logger.info("Landed successfully.")
-    
+
     # Disarm the vehicle
     logger.info("Disarming vehicle...")
     vehicle.armed = False
     
-    # Wait for disarm confirmation
     for _ in range(10):
         if not vehicle.armed:
             break
@@ -69,7 +91,6 @@ def emergency_slow_land(vehicle: Vehicle, logger: logging.Logger | None = None) 
     else:
         logger.warning("⚠️ Vehicle may still be armed")
     
-    # Disconnect from vehicle
     logger.info("Disconnecting from vehicle...")
     try:
         vehicle.close()
@@ -78,3 +99,4 @@ def emergency_slow_land(vehicle: Vehicle, logger: logging.Logger | None = None) 
         logger.error(f"Error disconnecting: {e}")
     
     logger.critical("Emergency landing complete. Exiting execution.")
+ 
