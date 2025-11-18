@@ -5,6 +5,11 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Optional
+
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
 
 from dronekit import LocationGlobalRelative, Vehicle
 
@@ -16,13 +21,14 @@ from services.safety_manager import (
 )
 from utils.geometry_utils import haversine_m
 
-# Position hold configuration
-HOLD_RATE_HZ = 1.0  # send simple_goto at 1 Hz when holding
-GOTO_THRESHOLD_M = 0.5  # only re-send goto if > this many meters from target
-DEFAULT_HOLD_SECONDS = 10
-
-
-def hold_position(vehicle: Vehicle, hold_time: int = DEFAULT_HOLD_SECONDS, target_alt: float = 5.0) -> bool:
+def hold_position(
+    vehicle: Vehicle,
+    hold_time: Optional[int] = None,
+    target_alt: Optional[float] = None,
+    *,
+    goto_threshold_m: Optional[float] = None,
+    hold_rate_hz: Optional[float] = None,
+) -> bool:
     """
     Actively hold the HOME position.
     
@@ -34,6 +40,19 @@ def hold_position(vehicle: Vehicle, hold_time: int = DEFAULT_HOLD_SECONDS, targe
     Returns:
         True if hold completed successfully, False if error occurred
     """
+    from config import get_flight_config
+
+    cfg = get_flight_config()
+
+    if hold_time is None:
+        hold_time = int(cfg.hold_seconds)
+    if target_alt is None:
+        target_alt = float(cfg.target_altitude)
+    if goto_threshold_m is None:
+        goto_threshold_m = float(cfg.goto_threshold_m)
+    if hold_rate_hz is None:
+        hold_rate_hz = float(cfg.hold_rate_hz)
+
     print("\n[HOLD] Actively holding position...")
     logging.info("HOLD: Actively holding position for %s seconds", hold_time)
     
@@ -85,7 +104,7 @@ def hold_position(vehicle: Vehicle, hold_time: int = DEFAULT_HOLD_SECONDS, targe
             logging.debug("Distance to HOME at iteration %s: %s m", iteration, dist)
 
             # If far from target → send goto
-            if dist > GOTO_THRESHOLD_M:
+            if dist > goto_threshold_m:
                 try:
                     vehicle.simple_goto(target)
                     print("  → Sent simple_goto to HOME")
@@ -99,7 +118,7 @@ def hold_position(vehicle: Vehicle, hold_time: int = DEFAULT_HOLD_SECONDS, targe
                 print("  → Within threshold; holding")
                 logging.debug("Within threshold; not re-sending goto at iteration %s", iteration)
 
-            time.sleep(1.0 / HOLD_RATE_HZ)
+            time.sleep(1.0 / hold_rate_hz)
 
         logging.info("Hold completed normally after %s iterations", iteration)
         return True  # Hold completed normally

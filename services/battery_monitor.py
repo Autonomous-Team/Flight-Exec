@@ -6,18 +6,23 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Optional
+
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
 
 from dronekit import Vehicle
 
 from services.safety_manager import is_safe_landing_triggered, trigger_safe_landing
 
-# Battery thresholds
-BATTERY_CRITICAL_THRESHOLD = 10.0  # trigger safe landing if battery below this %
-BATTERY_LOW_THRESHOLD = 20.0  # warn if battery below this %
-
-
-def start_battery_monitor(vehicle: Vehicle, stop_event: threading.Event) -> threading.Thread:
+def start_battery_monitor(
+    vehicle: Vehicle,
+    stop_event: threading.Event,
+    *,
+    critical_threshold: float,
+    low_threshold: float,
+    logger_name: str = "BatteryMonitor",
+) -> threading.Thread:
     """
     Start a background thread that periodically logs battery status.
     
@@ -31,6 +36,7 @@ def start_battery_monitor(vehicle: Vehicle, stop_event: threading.Event) -> thre
         The Thread object
     """
     def monitor():
+        logger = logging.getLogger(logger_name)
         while not stop_event.is_set() and not is_safe_landing_triggered():
             try:
                 if not getattr(vehicle, "connected", False):
@@ -49,16 +55,16 @@ def start_battery_monitor(vehicle: Vehicle, stop_event: threading.Event) -> thre
 
                 # Log battery data
                 if voltage is not None:
-                    logging.info("BATTERY: voltage=%.2fV", voltage)
+                    logger.info("BATTERY: voltage=%.2fV", voltage)
                 if current is not None:
-                    logging.info("BATTERY: current=%.2fA", current)
+                    logger.info("BATTERY: current=%.2fA", current)
                 if level is not None:
-                    logging.info("BATTERY: level=%.1f%%", level)
+                    logger.info("BATTERY: level=%.1f%%", level)
                     # Trigger safe landing on critical battery
-                    if level < BATTERY_CRITICAL_THRESHOLD:
+                    if level < critical_threshold:
                         trigger_safe_landing(f"Critical battery level: {level:.1f}%")
-                    elif level < BATTERY_LOW_THRESHOLD:
-                        logging.warning("BATTERY: Low battery warning - %.1f%% remaining", level)
+                    elif level < low_threshold:
+                        logger.warning("BATTERY: Low battery warning - %.1f%% remaining", level)
 
                 # Check voltage thresholds (if level not available)
                 if voltage is not None and level is None:
@@ -67,16 +73,16 @@ def start_battery_monitor(vehicle: Vehicle, stop_event: threading.Event) -> thre
                     if voltage < 12.0:
                         trigger_safe_landing(f"Critical battery voltage: {voltage:.2f}V")
                     elif voltage < 13.2:
-                        logging.warning("BATTERY: Low battery voltage warning - %.2fV", voltage)
+                        logger.warning("BATTERY: Low battery voltage warning - %.2fV", voltage)
 
                 # Log all battery attributes for comprehensive logging
                 if hasattr(battery, "__dict__"):
                     for attr, value in battery.__dict__.items():
                         if value is not None and not attr.startswith("_"):
-                            logging.debug("BATTERY: %s=%s", attr, value)
+                            logger.debug("BATTERY: %s=%s", attr, value)
 
             except Exception as e:
-                logging.exception("Battery monitor error: %s", e)
+                logger.exception("Battery monitor error: %s", e)
                 # If battery monitor fails repeatedly, trigger safe landing
                 trigger_safe_landing(f"Battery monitor error: {e}")
 
@@ -85,6 +91,6 @@ def start_battery_monitor(vehicle: Vehicle, stop_event: threading.Event) -> thre
 
     thr = threading.Thread(target=monitor, name="BatteryMonitor", daemon=True)
     thr.start()
-    logging.info("Battery monitor thread started.")
+    logging.getLogger(logger_name).info("Battery monitor thread started.")
     return thr
 

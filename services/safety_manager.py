@@ -8,6 +8,10 @@ import threading
 import time
 from typing import Optional
 
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
+
 from dronekit import LocationGlobalRelative, Vehicle, VehicleMode
 
 from utils.geometry_utils import haversine_m

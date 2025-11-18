@@ -9,6 +9,10 @@ import threading
 import time
 from typing import Optional
 
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
+
 from dronekit import LocationGlobalRelative, Vehicle, VehicleMode
 
 from services.enhanced_takeoff_service import arm_and_takeoff, land_and_disarm
@@ -96,7 +100,9 @@ def goto_point(
     d_north: float,
     d_east: float,
     target_altitude: float,
-    groundspeed: float = 0.1,
+    *,
+    groundspeed: Optional[float] = None,
+    arrival_threshold_m: Optional[float] = None,
 ) -> bool:
     """
     Fly to a point offset from the current position with safety checks.
@@ -111,6 +117,15 @@ def goto_point(
     Returns:
         True if successful, False if safety trigger occurred
     """
+    if groundspeed is None or arrival_threshold_m is None:
+        from config import get_mission_config
+
+        cfg = get_mission_config()
+        if groundspeed is None:
+            groundspeed = cfg.groundspeed
+        if arrival_threshold_m is None:
+            arrival_threshold_m = cfg.goto_threshold_m
+
     print(
         f"\n[STEP 5] Going to target point ({d_north} m North, {d_east} m East) "
         f"at {target_altitude} m altitude ({groundspeed} m/s)..."
@@ -184,7 +199,7 @@ def goto_point(
         print(f"  → Distance: {distance:.2f} m | Altitude: {current_alt:.2f} m")
         logging.debug("Goto progress: distance=%.2f m, alt_diff=%.2f m", distance, alt_diff)
 
-        if distance <= 0.5 and alt_diff <= 0.2:
+        if distance <= arrival_threshold_m and alt_diff <= 0.2:
             print("✅ Arrived at target point and altitude")
             logging.info("Arrived at target point and altitude")
             break
@@ -249,9 +264,19 @@ def execute_point_to_point_mission(
         # Start safety monitoring if enabled
         if enable_safety_monitoring:
             if cfg.enable_heartbeat_monitor:
-                hb_thread = start_heartbeat_monitor(vehicle, hb_stop)
+                hb_thread = start_heartbeat_monitor(
+                    vehicle,
+                    hb_stop,
+                    warn_seconds=cfg.heartbeat_warn_sec,
+                    critical_seconds=cfg.heartbeat_critical_sec,
+                )
             if cfg.enable_battery_monitor:
-                battery_thread = start_battery_monitor(vehicle, hb_stop)
+                battery_thread = start_battery_monitor(
+                    vehicle,
+                    hb_stop,
+                    critical_threshold=cfg.battery_critical_threshold,
+                    low_threshold=cfg.battery_low_threshold,
+                )
             if cfg.enable_jetson_monitor:
                 jetson_thread = start_jetson_monitor(hb_stop)
             if cfg.enable_fc_telemetry_monitor:
@@ -268,7 +293,11 @@ def execute_point_to_point_mission(
 
         # Arm and takeoff (uses enhanced_takeoff_service which saves home position)
         try:
-            arm_and_takeoff(vehicle, takeoff_altitude)
+            arm_and_takeoff(
+                vehicle,
+                takeoff_altitude,
+                home_wait_timeout=cfg.home_wait_timeout,
+            )
             # Check for safety triggers after takeoff
             if is_safe_landing_triggered():
                 reason = get_safe_landing_reason()
@@ -282,7 +311,14 @@ def execute_point_to_point_mission(
 
         # Navigate to waypoint
         try:
-            goto_ok = goto_point(vehicle, north_offset, east_offset, target_altitude)
+            goto_ok = goto_point(
+                vehicle,
+                north_offset,
+                east_offset,
+                target_altitude,
+                groundspeed=cfg.groundspeed,
+                arrival_threshold_m=cfg.goto_threshold_m,
+            )
             if not goto_ok:
                 print("\n⚠️ Goto interrupted by safety trigger")
                 logging.warning("Goto interrupted by safety trigger")

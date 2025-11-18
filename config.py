@@ -75,6 +75,10 @@ class MissionConfig:
     gps_wait_seconds: int = 10  # seconds to wait for GPS fix
     goto_threshold_m: float = 0.5  # meters - distance threshold for waypoint arrival
     groundspeed: float = 0.1  # m/s - default groundspeed for navigation
+    default_takeoff_altitude: float = 5.0  # meters
+    default_north_offset: float = 0.0  # meters
+    default_east_offset: float = 0.0  # meters
+    default_target_altitude: float = 5.0  # meters
 
     # Connection parameters
     fc_connect_timeout: float = 5.0

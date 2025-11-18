@@ -99,9 +99,8 @@ To customize, edit `config.py` or use CLI arguments to override.
 Basic flight: takeoff, hold position, land.
 
 ```bash
-python main/flight_main.py
-# or
 python -m main.flight_main
+# (run from the repository root)
 ```
 
 This will:
@@ -117,16 +116,16 @@ Ground testing arm/disarm operations (no GPS required).
 
 ```bash
 # Basic usage (uses config defaults)
-python main/arming_main.py
+python -m main.arming_main
 
 # Custom hold time
-python main/arming_main.py --hold-seconds 10
+python -m main.arming_main --hold-seconds 10
 
 # Keep arming checks enabled
-python main/arming_main.py --keep-checks
+python -m main.arming_main --keep-checks
 
 # Disable safety monitoring (not recommended)
-python main/arming_main.py --no-safety-monitoring
+python -m main.arming_main --no-safety-monitoring
 ```
 
 **Arguments:**
@@ -140,13 +139,16 @@ Point-to-point waypoint navigation.
 
 ```bash
 # Basic usage
-python main/mission_main.py 5.0 10.0 5.0 5.0
+python -m main.mission_main 5.0 10.0 5.0 5.0
+
+# Use config defaults (no positional arguments)
+python -m main.mission_main
 
 # With custom hover delay and GPS wait
-python main/mission_main.py 5.0 10.0 5.0 5.0 --hover-delay 5.0 --gps-wait 15
+python -m main.mission_main 5.0 10.0 5.0 5.0 --hover-delay 5.0 --gps-wait 15
 
 # Disable safety monitoring (NOT RECOMMENDED)
-python main/mission_main.py 5.0 10.0 5.0 5.0 --no-safety-monitoring
+python -m main.mission_main 5.0 10.0 5.0 5.0 --no-safety-monitoring
 ```
 
 **Arguments:**
@@ -161,7 +163,7 @@ python main/mission_main.py 5.0 10.0 5.0 5.0 --no-safety-monitoring
 **Example:**
 ```bash
 # Takeoff to 5m, fly 10m north and 5m east at 5m altitude, hover 5s, then land
-python main/mission_main.py 5.0 10.0 5.0 5.0 --hover-delay 5.0
+python -m main.mission_main 5.0 10.0 5.0 5.0 --hover-delay 5.0
 ```
 
 ## Safety Features
@@ -266,10 +268,20 @@ All monitors run as daemon threads:
 
 For ground testing without GPS:
 ```bash
-python main/arming_main.py --keep-checks
+python -m main.arming_main --keep-checks
 ```
 
 This uses STABILIZE mode and disables arming checks.
+
+### Quick Command Summary
+
+Run all commands from the repository root:
+
+| Operation | Command |
+| --- | --- |
+| Flight (takeoff/hold/land) | `python -m main.flight_main` |
+| Arming Service | `python -m main.arming_main [options]` |
+| Mission Service | `python -m main.mission_main [takeoff_alt north_offset east_offset target_alt] [options]` |
 
 ## Troubleshooting
 

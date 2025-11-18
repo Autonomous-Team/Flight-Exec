@@ -6,6 +6,10 @@ from __future__ import annotations
 import logging
 from typing import Iterable, Sequence, Tuple
 
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
+
 from dronekit import Vehicle, connect
 
 from utils.port_utils import list_serial_ports, set_port_permissions

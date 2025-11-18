@@ -5,6 +5,11 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Optional
+
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
 
 from dronekit import LocationGlobalRelative, Vehicle, VehicleMode
 
@@ -16,11 +21,12 @@ from services.safety_manager import (
     trigger_safe_landing,
 )
 
-# Configuration
-HOME_WAIT_TIMEOUT = 15  # seconds to wait for valid location after takeoff
-
-
-def arm_and_takeoff(vehicle: Vehicle, target_altitude: float) -> None:
+def arm_and_takeoff(
+    vehicle: Vehicle,
+    target_altitude: float,
+    *,
+    home_wait_timeout: Optional[int] = None,
+) -> None:
     """
     Arm vehicle and take off to target_altitude, saving HOME when valid.
     
@@ -92,9 +98,14 @@ def arm_and_takeoff(vehicle: Vehicle, target_altitude: float) -> None:
         print("⚠️ simple_takeoff command failed:", e)
         logging.exception("simple_takeoff command failed: %s", e)
 
+    if home_wait_timeout is None:
+        from config import get_flight_config
+
+        home_wait_timeout = get_flight_config().home_wait_timeout
+
     # Wait for global_relative_frame to become available (so we can save HOME)
     waited = 0
-    while waited < HOME_WAIT_TIMEOUT:
+    while waited < home_wait_timeout:
         lat = getattr(vehicle.location.global_relative_frame, "lat", None)
         lon = getattr(vehicle.location.global_relative_frame, "lon", None)
         logging.debug("Takeoff wait loop iteration %s: lat=%s lon=%s", waited, lat, lon)

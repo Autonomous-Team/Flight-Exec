@@ -17,6 +17,10 @@ import logging
 import threading
 from typing import Optional
 
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
+
 from dronekit import Vehicle
 
 from services.battery_monitor import start_battery_monitor
@@ -70,9 +74,19 @@ def main() -> None:
 
         # 3) Start all monitoring threads based on config
         if cfg.enable_heartbeat_monitor:
-            hb_thread = start_heartbeat_monitor(vehicle, hb_stop)
+            hb_thread = start_heartbeat_monitor(
+                vehicle,
+                hb_stop,
+                warn_seconds=cfg.heartbeat_warn_sec,
+                critical_seconds=cfg.heartbeat_critical_sec,
+            )
         if cfg.enable_battery_monitor:
-            battery_thread = start_battery_monitor(vehicle, hb_stop)
+            battery_thread = start_battery_monitor(
+                vehicle,
+                hb_stop,
+                critical_threshold=cfg.battery_critical_threshold,
+                low_threshold=cfg.battery_low_threshold,
+            )
         if cfg.enable_jetson_monitor:
             jetson_thread = start_jetson_monitor(hb_stop)
         if cfg.enable_fc_telemetry_monitor:
@@ -80,7 +94,11 @@ def main() -> None:
 
         # 4) Arm and takeoff
         try:
-            arm_and_takeoff(vehicle, cfg.target_altitude)
+            arm_and_takeoff(
+                vehicle,
+                cfg.target_altitude,
+                home_wait_timeout=cfg.home_wait_timeout,
+            )
             # Check for safe landing trigger after takeoff
             if is_safe_landing_triggered():
                 reason = get_safe_landing_reason()
@@ -94,7 +112,11 @@ def main() -> None:
         # 5) Active hold with safety wrapper and safe landing monitoring
         try:
             hold_ok = hold_position(
-                vehicle, hold_time=int(cfg.hold_seconds), target_alt=cfg.target_altitude
+                vehicle,
+                hold_time=int(cfg.hold_seconds),
+                target_alt=cfg.target_altitude,
+                goto_threshold_m=cfg.goto_threshold_m,
+                hold_rate_hz=cfg.hold_rate_hz,
             )
 
             # Check for safe landing triggers during/after hold

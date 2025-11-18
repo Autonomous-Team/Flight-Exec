@@ -9,6 +9,10 @@ import threading
 import time
 from typing import Optional
 
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
+
 from dronekit import Vehicle, VehicleMode
 
 from services.safety_manager import (
@@ -19,11 +23,6 @@ from services.safety_manager import (
 from utils.detect_controller import connect_to_first_available, list_candidate_ports
 from utils.logging_utils import setup_logging
 from utils.port_utils import report_port_users
-
-if not hasattr(collections, "MutableMapping"):
-    import collections.abc
-
-    collections.MutableMapping = collections.abc.MutableMapping  # type: ignore
 
 
 def arm_vehicle(vehicle: Vehicle, disable_checks: bool = True) -> None:
@@ -172,9 +171,19 @@ def execute_arm_disarm(
             from services.fc_telemetry_monitor import start_fc_telemetry_monitor
 
             if cfg.enable_heartbeat_monitor:
-                hb_thread = start_heartbeat_monitor(vehicle, hb_stop)
+                hb_thread = start_heartbeat_monitor(
+                    vehicle,
+                    hb_stop,
+                    warn_seconds=cfg.heartbeat_warn_sec,
+                    critical_seconds=cfg.heartbeat_critical_sec,
+                )
             if cfg.enable_battery_monitor:
-                battery_thread = start_battery_monitor(vehicle, hb_stop)
+                battery_thread = start_battery_monitor(
+                    vehicle,
+                    hb_stop,
+                    critical_threshold=cfg.battery_critical_threshold,
+                    low_threshold=cfg.battery_low_threshold,
+                )
             if cfg.enable_jetson_monitor:
                 jetson_thread = start_jetson_monitor(hb_stop)
             if cfg.enable_fc_telemetry_monitor:

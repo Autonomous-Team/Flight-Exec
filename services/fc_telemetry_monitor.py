@@ -7,6 +7,10 @@ import logging
 import math
 import threading
 
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
+
 from dronekit import Vehicle
 
 from services.safety_manager import is_safe_landing_triggered, trigger_safe_landing

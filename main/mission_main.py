@@ -21,21 +21,25 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "takeoff_altitude",
         type=float,
+        nargs="?",
         help="Altitude to reach on takeoff (meters)",
     )
     parser.add_argument(
         "north_offset",
         type=float,
+        nargs="?",
         help="Meters to travel north from the takeoff point",
     )
     parser.add_argument(
         "east_offset",
         type=float,
+        nargs="?",
         help="Meters to travel east from the takeoff point",
     )
     parser.add_argument(
         "target_altitude",
         type=float,
+        nargs="?",
         help="Cruise altitude at the waypoint (meters)",
     )
     parser.add_argument(
@@ -60,13 +64,35 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
 def main(args: Optional[list[str]] = None) -> None:
     """CLI entry point for mission service."""
+    from config import get_mission_config
+
+    cfg = get_mission_config()
+
     parser = build_cli_parser()
     parsed = parser.parse_args(args=args)
+
+    takeoff_altitude = (
+        parsed.takeoff_altitude
+        if parsed.takeoff_altitude is not None
+        else cfg.default_takeoff_altitude
+    )
+    north_offset = (
+        parsed.north_offset if parsed.north_offset is not None else cfg.default_north_offset
+    )
+    east_offset = (
+        parsed.east_offset if parsed.east_offset is not None else cfg.default_east_offset
+    )
+    target_altitude = (
+        parsed.target_altitude
+        if parsed.target_altitude is not None
+        else cfg.default_target_altitude
+    )
+
     execute_point_to_point_mission(
-        parsed.takeoff_altitude,
-        parsed.north_offset,
-        parsed.east_offset,
-        parsed.target_altitude,
+        takeoff_altitude,
+        north_offset,
+        east_offset,
+        target_altitude,
         hover_delay=parsed.hover_delay,
         gps_wait_seconds=parsed.gps_wait,
         enable_safety_monitoring=not parsed.no_safety_monitoring,

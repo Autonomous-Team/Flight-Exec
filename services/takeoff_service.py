@@ -8,6 +8,10 @@ import logging
 import time
 from typing import Protocol
 
+from utils.compat import ensure_dronekit_compat
+
+ensure_dronekit_compat()
+
 from dronekit import Vehicle, VehicleMode
 
 from utils.detect_controller import connect_to_first_available, list_candidate_ports
