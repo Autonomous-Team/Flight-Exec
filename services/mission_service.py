@@ -30,11 +30,23 @@ from utils.safe_disconnect import safe_disconnect
 EARTH_RADIUS = 6378137.0
 
 
-def get_location_offset_meters(
-    origin: LocationGlobalRelative,
-    d_north: float,
-    d_east: float,
-) -> LocationGlobalRelative:
+def wait_until(predicate_fn, timeout, period=1.0):
+    """Repeatedly check a condition; exit early on success, timeout otherwise."""
+    start = time.time()
+    while True:
+        try:
+            if predicate_fn():
+                return
+        except Exception:
+            pass
+
+        if time.time() - start >= timeout:
+            raise TimeoutError("wait_until() timed out")
+
+        time.sleep(period)
+
+
+def get_location_offset_meters(origin, d_north, d_east):
     lat_rad = math.radians(origin.lat)
     d_lat = d_north / EARTH_RADIUS
     d_lon = d_east / (EARTH_RADIUS * math.cos(lat_rad))
@@ -43,14 +55,11 @@ def get_location_offset_meters(
     return LocationGlobalRelative(new_lat, new_lon, origin.alt)
 
 
-def haversine_distance_m(
-    location_a: LocationGlobalRelative,
-    location_b: LocationGlobalRelative,
-) -> float:
-    lat1 = math.radians(location_a.lat)
-    lon1 = math.radians(location_a.lon)
-    lat2 = math.radians(location_b.lat)
-    lon2 = math.radians(location_b.lon)
+def haversine_distance_m(a, b):
+    lat1 = math.radians(a.lat)
+    lon1 = math.radians(a.lon)
+    lat2 = math.radians(b.lat)
+    lon2 = math.radians(b.lon)
     dlat = lat2 - lat1
     dlon = lon2 - lon1
     sa = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
@@ -59,15 +68,9 @@ def haversine_distance_m(
 
 
 # -----------------------------------------------------------
-# MISSION FUNCTIONS (FULLY PATCHED WITH SAFETY FALLBACKS)
+# MISSION FUNCTIONS WITH wait_until()
 # -----------------------------------------------------------
-def goto_point(
-    vehicle: Vehicle,
-    target_location: LocationGlobalRelative,
-    groundspeed: float = 0.5,
-    tolerance_m: float = 0.5,
-    logger: logging.Logger | None = None,
-) -> None:
+def goto_point(vehicle, target_location, groundspeed=0.5, tolerance_m=0.5, logger=None):
     if logger is None:
         logger = logging.getLogger("drone_logger")
 
@@ -83,32 +86,26 @@ def goto_point(
         emergency_slow_land(vehicle, logger)
         raise
 
-    while True:
-        try:
-            current = vehicle.location.global_relative_frame
-            dist = haversine_distance_m(current, target_location)
-            logger.debug(f"Distance to target: {dist:.2f}m")
+    try:
+        wait_until(
+            lambda: haversine_distance_m(vehicle.location.global_relative_frame, target_location)
+            <= tolerance_m,
+            timeout=15,
+            period=1,
+        )
+    except TimeoutError:
+        logger.error("goto_point(): Position not improving within timeout → EMERGENCY LAND")
+        emergency_slow_land(vehicle, logger)
+        raise
 
-            if dist <= tolerance_m:
-                logger.info("Reached target location (within tolerance).")
-                break
-        except Exception as e:
-            logger.error(f"Location read error during navigation: {e} → EMERGENCY LAND")
-            emergency_slow_land(vehicle, logger)
-            raise
-
-        time.sleep(1)
+    logger.info("Reached target location (within tolerance).")
 
 
-def hold_at_point_using_loiter(
-    vehicle: Vehicle,
-    hold_time: float = 10.0,
-    logger: logging.Logger | None = None,
-) -> None:
+def hold_at_point_using_loiter(vehicle, hold_time=10.0, logger=None):
     if logger is None:
         logger = logging.getLogger("drone_logger")
 
-    logger.info("Switching to LOITER for stable hold...")
+    logger.info("Switching to LOITER...")
 
     try:
         vehicle.mode = VehicleMode("LOITER")
@@ -117,19 +114,18 @@ def hold_at_point_using_loiter(
         emergency_slow_land(vehicle, logger)
         raise
 
-    start = time.time()
-    while vehicle.mode.name != "LOITER":
-        logger.info("Waiting for LOITER...")
-        time.sleep(1)
-        if time.time() - start > 10:
-            logger.error("LOITER mode timeout → EMERGENCY LAND")
-            emergency_slow_land(vehicle, logger)
-            raise
+    # Wait for LOITER mode (with early exit)
+    try:
+        wait_until(lambda: vehicle.mode.name == "LOITER", timeout=10, period=1)
+    except TimeoutError:
+        logger.error("LOITER mode timeout → EMERGENCY LAND")
+        emergency_slow_land(vehicle, logger)
+        raise
 
     logger.info(f"Holding in LOITER for {hold_time} seconds...")
 
-    t0 = time.time()
-    while time.time() - t0 < hold_time:
+    start = time.time()
+    while time.time() - start < hold_time:
         try:
             loc = vehicle.location.global_relative_frame
             logger.debug(f"LOITER HOLD → lat={loc.lat}, lon={loc.lon}, alt={loc.alt:.2f}m")
@@ -137,7 +133,6 @@ def hold_at_point_using_loiter(
             logger.error(f"Location read failed during LOITER: {e} → EMERGENCY LAND")
             emergency_slow_land(vehicle, logger)
             raise
-
         time.sleep(1)
 
     logger.info("Switching back to GUIDED...")
@@ -149,21 +144,16 @@ def hold_at_point_using_loiter(
         emergency_slow_land(vehicle, logger)
         raise
 
-    start = time.time()
-    while vehicle.mode.name != "GUIDED":
-        logger.info("Waiting for GUIDED mode...")
-        time.sleep(1)
-        if time.time() - start > 10:
-            logger.error("GUIDED mode timeout → EMERGENCY LAND")
-            emergency_slow_land(vehicle, logger)
-            raise
+    # Wait for GUIDED mode (with early exit)
+    try:
+        wait_until(lambda: vehicle.mode.name == "GUIDED", timeout=10, period=1)
+    except TimeoutError:
+        logger.error("GUIDED mode timeout → EMERGENCY LAND")
+        emergency_slow_land(vehicle, logger)
+        raise
 
 
-def return_home_and_land(
-    vehicle: Vehicle,
-    home_location: LocationGlobalRelative,
-    logger: logging.Logger | None = None,
-) -> None:
+def return_home_and_land(vehicle, home_location, logger=None):
     if logger is None:
         logger = logging.getLogger("drone_logger")
 
@@ -172,18 +162,13 @@ def return_home_and_land(
         emergency_slow_land(vehicle, logger)
         return
 
-    logger.info("Returning to HOME in GUIDED mode (approach altitude 2m)...")
+    logger.info("Returning to HOME (approach at 2m)...")
 
-    try:
-        home_approach = LocationGlobalRelative(home_location.lat, home_location.lon, 2)
-    except Exception as e:
-        logger.error(f"Home approach creation failed: {e} → EMERGENCY LAND")
-        emergency_slow_land(vehicle, logger)
-        raise
+    home_approach = LocationGlobalRelative(home_location.lat, home_location.lon, 2)
 
     goto_point(vehicle, home_approach, groundspeed=0.5, tolerance_m=0.7, logger=logger)
 
-    logger.info("Commanding LAND mode...")
+    logger.info("Commanding LAND...")
 
     try:
         vehicle.mode = VehicleMode("LAND")
@@ -199,7 +184,6 @@ def return_home_and_land(
             logger.debug(f"Landing... alt={alt:.2f}m")
         except Exception:
             logger.debug("Landing... alt unknown")
-
         time.sleep(1)
 
         if time.time() - start > 300:
@@ -207,20 +191,15 @@ def return_home_and_land(
             emergency_slow_land(vehicle, logger)
             break
 
-    logger.info("Landing sequence complete (if disarm occurred).")
+    logger.info("Landing sequence complete.")
 
 
-def execute_point_to_point_mission(
-    target_altitude: float = 3.0,
-    move_north: float = 5.0,
-    move_east: float = 0.0,
-    hold_time: float = 10.0,
-) -> None:
+def execute_point_to_point_mission(target_altitude=3.0, move_north=5.0, move_east=0.0, hold_time=10.0):
     logger = setup_logger()
     logging.getLogger("dronekit").setLevel(logging.CRITICAL)
 
-    vehicle: Vehicle | None = None
-    home_location: LocationGlobalRelative | None = None
+    vehicle = None
+    home_location = None
 
     try:
         candidate_ports = list_candidate_ports()
@@ -256,7 +235,7 @@ def execute_point_to_point_mission(
         logger.info("Script finished — No vehicle connection.")
 
 
-def main() -> None:
+def main():
     execute_point_to_point_mission()
 
 
