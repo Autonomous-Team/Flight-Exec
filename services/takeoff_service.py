@@ -280,7 +280,7 @@ def land_at_home(
                 raise
 
         try:
-            vehicle.simple_goto(home_point)
+            vehicle.simple_goto(home_point, groundspeed=0.3)
         except Exception as e:
             logger.error(f"Failed goto HOME: {e} → attempting recovery before emergency land")
             ok = wait_until(lambda: getattr(vehicle, "location", None) is not None and

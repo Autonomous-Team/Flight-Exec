@@ -70,7 +70,7 @@ def haversine_distance_m(a, b):
 # -----------------------------------------------------------
 # MISSION FUNCTIONS WITH wait_until()
 # -----------------------------------------------------------
-def goto_point(vehicle, target_location, groundspeed=0.5, tolerance_m=0.5, logger=None):
+def goto_point(vehicle, target_location, groundspeed=0.3, tolerance_m=0.5, logger=None):
     if logger is None:
         logger = logging.getLogger("drone_logger")
 
@@ -153,7 +153,7 @@ def hold_at_point_using_loiter(vehicle, hold_time=10.0, logger=None):
         raise
 
 
-def return_home_and_land(vehicle, home_location, logger=None):
+def return_home_and_land(vehicle, home_location, target_altitude, logger=None):
     if logger is None:
         logger = logging.getLogger("drone_logger")
 
@@ -162,11 +162,12 @@ def return_home_and_land(vehicle, home_location, logger=None):
         emergency_slow_land(vehicle, logger)
         return
 
-    logger.info("Returning to HOME (approach at 2m)...")
+    logger.info(f"Returning to HOME at {target_altitude}m altitude (maintaining mission altitude)...")
 
-    home_approach = LocationGlobalRelative(home_location.lat, home_location.lon, 2)
+    # Return to home at the same altitude as the mission (not descending)
+    home_approach = LocationGlobalRelative(home_location.lat, home_location.lon, target_altitude)
 
-    goto_point(vehicle, home_approach, groundspeed=0.5, tolerance_m=0.7, logger=logger)
+    goto_point(vehicle, home_approach, groundspeed=0.3, tolerance_m=0.7, logger=logger)
 
     logger.info("Commanding LAND...")
 
@@ -194,7 +195,7 @@ def return_home_and_land(vehicle, home_location, logger=None):
     logger.info("Landing sequence complete.")
 
 
-def execute_point_to_point_mission(target_altitude=3.0, move_north=5.0, move_east=0.0, hold_time=10.0):
+def execute_point_to_point_mission(target_altitude=5.0, move_north=5.0, move_east=0.0, hold_time=10.0):
     logger = setup_logger()
     logging.getLogger("dronekit").setLevel(logging.CRITICAL)
 
@@ -211,15 +212,23 @@ def execute_point_to_point_mission(target_altitude=3.0, move_north=5.0, move_eas
         mavlink_logger = create_mavlink_logger(logger)
         vehicle.add_message_listener('*', mavlink_logger)
 
+        logger.info(f"Mission altitude set to {target_altitude}m - will maintain this altitude throughout the mission")
+        
         home_lat, home_lon, home_alt = arm_and_takeoff(vehicle, target_altitude, logger)
-        home_location = LocationGlobalRelative(home_lat, home_lon, home_alt)
+        # Use target_altitude for home_location to ensure consistent altitude throughout mission
+        home_location = LocationGlobalRelative(home_lat, home_lon, target_altitude)
 
         point_B = get_location_offset_meters(home_location, move_north, move_east)
         point_B.alt = target_altitude
 
-        goto_point(vehicle, point_B, groundspeed=0.5, tolerance_m=0.5, logger=logger)
+        logger.info(f"Navigating to point B at {target_altitude}m altitude...")
+        goto_point(vehicle, point_B, groundspeed=0.3, tolerance_m=0.5, logger=logger)
+        
+        logger.info(f"Holding at point B in LOITER mode at {target_altitude}m altitude...")
         hold_at_point_using_loiter(vehicle, hold_time=hold_time, logger=logger)
-        return_home_and_land(vehicle, home_location, logger)
+        
+        logger.info(f"Returning to home at {target_altitude}m altitude...")
+        return_home_and_land(vehicle, home_location, target_altitude, logger)
 
         logger.info("Mission complete.")
 

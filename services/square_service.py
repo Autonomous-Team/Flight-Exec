@@ -117,7 +117,7 @@ def offset_location_meters(
 def _safe_simple_goto(
     vehicle: Vehicle,
     target: LocationGlobalRelative,
-    groundspeed: float | None = None,
+    groundspeed: float = 0.3,
     logger: logging.Logger | None = None,
     retries: int = 3,
     retry_delay: float = 1.0,
@@ -129,10 +129,7 @@ def _safe_simple_goto(
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
-            if groundspeed is not None:
-                vehicle.simple_goto(target, groundspeed=groundspeed)
-            else:
-                vehicle.simple_goto(target)
+            vehicle.simple_goto(target, groundspeed=groundspeed)
             logger.debug(f"simple_goto issued (attempt {attempt}) → target lat={target.lat}, lon={target.lon}, alt={target.alt}")
             return
         except Exception as e:
@@ -154,10 +151,7 @@ def _safe_simple_goto(
         raise last_exc
     # else recovered — try one last time
     try:
-        if groundspeed is not None:
-            vehicle.simple_goto(target, groundspeed=groundspeed)
-        else:
-            vehicle.simple_goto(target)
+        vehicle.simple_goto(target, groundspeed=groundspeed)
         logger.debug("simple_goto issued after recovery")
         return
     except Exception as e:
@@ -281,7 +275,7 @@ def move_offset(
     east: float,
     label: str,
     logger: logging.Logger | None = None,
-    groundspeed: float | None = None,
+    groundspeed: float = 0.3,
     goto_retries: int = 3,
     goto_delay: float = 1.0,
 ) -> None:
@@ -410,7 +404,7 @@ def execute_square_mission(
 
 def execute_square_mission_service(
     altitude: float = 5.0,
-    side_length: float = 4.0,
+    side_length: float = 7.0,
     hold_seconds: float = 10.0,
 ) -> None:
     """Execute complete square flight mission with connection and logging."""
